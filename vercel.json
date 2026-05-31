@@ -1,0 +1,11 @@
+{
+  "rewrites": [
+    { "source": "/qr/:ticket", "destination": "/index.html" },
+    { "source": "/lobby/:ticket", "destination": "/index.html" },
+    { "source": "/sala/:ticket", "destination": "/index.html" },
+    { "source": "/tv/:ticket", "destination": "/index.html" },
+    { "source": "/admin/:ticket", "destination": "/index.html" },
+    { "source": "/dev", "destination": "/index.html" },
+    { "source": "/(.*)", "destination": "/index.html" }
+  ]
+}

@@ -681,6 +681,7 @@ function App() {
   const [activePromoIndex, setActivePromoIndex] = useState(0);
   const [karaokePaused, setKaraokePaused] = useState(false);
   const [privateRooms, setPrivateRooms] = useState([]);
+  const [dashboardRooms, setDashboardRooms] = useState([]);
   const [roomsLoaded, setRoomsLoaded] = useState(false);
   const [screenLoading, setScreenLoading] = useState({
     active: false,
@@ -726,6 +727,8 @@ function App() {
   const roomStateLoadedRef = useRef(false);
   const lastRoomStateAppliedRef = useRef(null);
   const lastRoomStateSavedRef = useRef(null);
+  const promoSaveTimerRef = useRef(null);
+  const promoEditingUntilRef = useRef(0);
 
   const loadPrivateRoomsFromSupabase = async () => {
     try {
@@ -747,9 +750,48 @@ function App() {
     }
   };
 
+  const loadDevDashboardData = async () => {
+    try {
+      const [overview, catalog, blocked] = await Promise.all([
+        api.listRoomsOverview(),
+        api.listVideoCatalog(),
+        api.listBlockedVideos(),
+      ]);
+
+      setDashboardRooms(overview);
+      setYoutubeCatalog(catalog);
+      setBlockedYoutubeVideos(blocked);
+    } catch (error) {
+      console.error("Error cargando datos del Dev Panel:", error);
+    }
+  };
+
   useEffect(() => {
     loadPrivateRoomsFromSupabase();
+    loadDevDashboardData();
   }, []);
+
+  useEffect(() => {
+    if (screen !== "dev") return;
+
+    loadPrivateRoomsFromSupabase();
+    loadDevDashboardData();
+
+    const unsubscribe = api.subscribeDevDashboard?.(() => {
+      loadPrivateRoomsFromSupabase();
+      loadDevDashboardData();
+    });
+
+    const interval = setInterval(() => {
+      loadPrivateRoomsFromSupabase();
+      loadDevDashboardData();
+    }, 5000);
+
+    return () => {
+      unsubscribe?.();
+      clearInterval(interval);
+    };
+  }, [screen]);
 
   const showScreenLoading = (title = "Preparando", message = "Un momento...") => {
     setScreenLoading({
@@ -908,19 +950,27 @@ function App() {
         return;
       }
 
+      const isEditingPromos = Date.now() < promoEditingUntilRef.current;
+
       if (roomForTheme) {
-        const nextPromos = promosFromDb || roomForTheme.promos || promoSlides || createEmptyPromoSlides();
+        const nextPromos = isEditingPromos
+          ? promoSlides
+          : promosFromDb || roomForTheme.promos || promoSlides || createEmptyPromoSlides();
         const roomWithPromos = { ...roomForTheme, promos: nextPromos };
 
         setCurrentPrivateRoom(roomWithPromos);
-        setPromoSlides(nextPromos);
+
+        if (!isEditingPromos) {
+          setPromoSlides(nextPromos);
+        }
+
         setPrivateRooms((current) => {
           const exists = current.some((room) => room.ticket === cleanTicket);
           return exists
             ? current.map((room) => (room.ticket === cleanTicket ? { ...room, ...roomWithPromos } : room))
             : [roomWithPromos, ...current];
         });
-      } else if (promosFromDb) {
+      } else if (promosFromDb && !isEditingPromos) {
         setPromoSlides(promosFromDb);
       }
 
@@ -1247,9 +1297,12 @@ function App() {
   };
 
   const setPromoSlidesAndPersist = (updater) => {
+    const cleanTicket = makeTicket(roomCode || currentPrivateRoom?.ticket);
+
+    promoEditingUntilRef.current = Date.now() + 2200;
+
     setPromoSlides((current) => {
       const nextPromos = typeof updater === "function" ? updater(current) : updater;
-      const cleanTicket = makeTicket(roomCode || currentPrivateRoom?.ticket);
 
       if (currentPrivateRoom) {
         setPrivateRooms((rooms) =>
@@ -1282,11 +1335,21 @@ function App() {
       }
 
       if (cleanTicket) {
-        nextPromos.forEach((promo, index) => {
-          api.savePromo(cleanTicket, index + 1, promo).catch((error) => {
-            console.error(`Error guardando Promo ${index + 1} en Supabase:`, error);
-          });
-        });
+        if (promoSaveTimerRef.current) {
+          clearTimeout(promoSaveTimerRef.current);
+        }
+
+        promoSaveTimerRef.current = setTimeout(() => {
+          Promise.all(
+            nextPromos.map((promo, index) => api.savePromo(cleanTicket, index + 1, promo))
+          )
+            .then(() => {
+              promoEditingUntilRef.current = Date.now() + 500;
+            })
+            .catch((error) => {
+              console.error("Error guardando promos en Supabase:", error);
+            });
+        }, 650);
       }
 
       return nextPromos;
@@ -1825,7 +1888,14 @@ function App() {
 
     try {
       await api.markVideoErrorAndSkip(roomCode, song, reason);
+      const [catalog, blocked] = await Promise.all([
+        api.listVideoCatalog(),
+        api.listBlockedVideos(),
+      ]);
+      setYoutubeCatalog(catalog);
+      setBlockedYoutubeVideos(blocked);
       await refreshRoomFromSupabase("video-error");
+      loadDevDashboardData();
     } catch (error) {
       console.error("Error marcando video fallido", error);
     }
@@ -1853,10 +1923,17 @@ function App() {
         thumbnail: localVideo.thumbnail,
         searchQuery: localVideo.searchQuery,
         originalYoutubeId: localVideo.originalYoutubeId,
+        originalUrl: localVideo.originalUrl,
       });
 
-      setYoutubeCatalog((current) => [newVideo, ...current.filter((item) => item.youtubeId !== newVideo.youtubeId)]);
-      setBlockedYoutubeVideos(await api.listBlockedVideos());
+      const [catalog, blocked] = await Promise.all([
+        api.listVideoCatalog(),
+        api.listBlockedVideos(),
+      ]);
+
+      setYoutubeCatalog(catalog);
+      setBlockedYoutubeVideos(blocked);
+      loadDevDashboardData();
 
       setYoutubeSearchState({
         loading: false,
@@ -1903,6 +1980,7 @@ function App() {
       await api.markVideoRequested(video);
       const catalog = await api.listVideoCatalog();
       setYoutubeCatalog(catalog);
+      loadDevDashboardData();
     } catch (error) {
       console.error("Error marcando video pedido", error);
     }
@@ -1967,12 +2045,12 @@ function App() {
       setYoutubeSearchResults(results);
       setYoutubeSearchState({ loading: false, message: "Resultados nuevos desde YouTube. Quedaron listos para pedir.", fromCache: false });
     } catch (error) {
-      const results = filterBlockedYoutubeVideos(demoYoutubeResults(query), blockedYoutubeVideos);
-      setYoutubeSearchResults(results);
+      console.error("Error buscando en YouTube:", error);
+      setYoutubeSearchResults([]);
       setYoutubeSearchState({
         loading: false,
-        message: "No se pudo usar la función de YouTube. Mostrando modo demo mientras configuras youtube-search.",
-        fromCache: true,
+        message: "No se pudo consultar YouTube. Revisa la función youtube-search o intenta de nuevo.",
+        fromCache: false,
       });
     }
   };
@@ -2464,6 +2542,7 @@ function App() {
       {screen === "dev" && (
         <DevDashboard
           privateRooms={privateRooms}
+          dashboardRooms={dashboardRooms}
           createPrivateRoom={createPrivateRoom}
           updatePrivateRoom={updatePrivateRoom}
           renewPrivateRoom={renewPrivateRoom}
@@ -2471,7 +2550,12 @@ function App() {
           deletePrivateRoom={deletePrivateRoom}
           devEditingRoomId={devEditingRoomId}
           setDevEditingRoomId={setDevEditingRoomId}
-          onOpenRoom={(room) => activatePrivateRoomByTicket(room.ticket, "dev", "lobby")}
+          onOpenRoom={(room) =>
+            room.isPublic
+              ? openPublicRoomByCode(room.ticket, "lobby")
+              : activatePrivateRoomByTicket(room.ticket, "dev", "lobby")
+          }
+          onRefreshDevDashboard={loadDevDashboardData}
           videoCatalog={youtubeCatalog}
           clearVideoCatalog={clearYoutubeLocalCache}
           addLocalVideoToCatalog={addLocalVideoToCatalog}
@@ -2821,6 +2905,7 @@ function ConfirmModal({
 
 function DevDashboard({
   privateRooms,
+  dashboardRooms = [],
   createPrivateRoom,
   updatePrivateRoom,
   renewPrivateRoom,
@@ -2834,9 +2919,12 @@ function DevDashboard({
   addLocalVideoToCatalog,
   blockedYoutubeVideos = [],
   roomUsersClock = 0,
+  onRefreshDevDashboard,
   onBack,
 }) {
   const logoInputRef = useRef(null);
+  const localVideoInputRef = useRef(null);
+  const [localVideoUploading, setLocalVideoUploading] = useState(false);
   const [devTab, setDevTab] = useState("rooms");
   const [form, setForm] = useState({
     businessName: "",
@@ -2861,14 +2949,15 @@ function DevDashboard({
     thumbnail: "",
     searchQuery: "",
     originalYoutubeId: "",
+    originalUrl: "",
   });
 
   const setLocalVideoField = (field, value) => {
     setLocalVideoForm((current) => ({ ...current, [field]: value }));
   };
 
-  const saveLocalVideoFromDev = () => {
-    addLocalVideoToCatalog?.(localVideoForm);
+  const saveLocalVideoFromDev = async () => {
+    await addLocalVideoToCatalog?.(localVideoForm);
     setLocalVideoForm({
       title: "",
       channelTitle: "Biblioteca local",
@@ -2876,18 +2965,61 @@ function DevDashboard({
       thumbnail: "",
       searchQuery: "",
       originalYoutubeId: "",
+      originalUrl: "",
     });
+    onRefreshDevDashboard?.();
+  };
+
+  const copyVideoUrl = async (video) => {
+    const url =
+      video?.localVideoUrl ||
+      video?.url ||
+      (video?.youtubeId ? youtubeUrlFromId(video.youtubeId) : "");
+
+    if (!url) return;
+
+    try {
+      await navigator.clipboard.writeText(url);
+    } catch (error) {
+      console.log(url);
+    }
+  };
+
+  const uploadLocalVideoFile = async (file) => {
+    if (!file) return;
+
+    try {
+      setLocalVideoUploading(true);
+      const safeName = file.name.replace(/[^a-zA-Z0-9._-]/g, "-");
+      const url = await api.uploadPublicFile(
+        "spaceoke-videos",
+        `videos/${Date.now()}-${safeName}`,
+        file
+      );
+
+      setLocalVideoForm((current) => ({
+        ...current,
+        localVideoUrl: url,
+        title: current.title || file.name.replace(/\.[^.]+$/, ""),
+      }));
+    } catch (error) {
+      console.error("Error subiendo MP4", error);
+      alert(error.message || "No se pudo subir el MP4.");
+    } finally {
+      setLocalVideoUploading(false);
+    }
   };
 
   const editingRoom = privateRooms.find((room) => room.id === devEditingRoomId);
-  const totalSongs = privateRooms.reduce(
+  const displayRooms = dashboardRooms.length > 0 ? dashboardRooms : privateRooms;
+  const totalSongs = displayRooms.reduce(
     (total, room) => total + (room.stats?.totalSongsPlayed || 0),
     0
   );
   const totalCachedVideos = videoCatalog.length;
-  const totalActiveUsers = privateRooms.reduce((total, room) => total + getActiveUsersForRoom(room.ticket).length, 0);
-  const activeRooms = privateRooms.filter((room) => getRoomStatus(room) === "active" || getRoomStatus(room) === "warning").length;
-  const expiredRooms = privateRooms.filter((room) => getRoomStatus(room) === "expired").length;
+  const totalActiveUsers = displayRooms.reduce((total, room) => total + (room.stats?.activeUsers || 0), 0);
+  const activeRooms = displayRooms.filter((room) => getRoomStatus(room) === "active" || getRoomStatus(room) === "warning").length;
+  const expiredRooms = displayRooms.filter((room) => getRoomStatus(room) === "expired").length;
 
   const syncFormFromRoom = (room) => {
     if (!room) return;
@@ -3073,11 +3205,11 @@ function DevDashboard({
 
         {devTab === "rooms" && (
           <div className="dev-room-list">
-            {privateRooms.length === 0 && (
-              <div className="empty-admin">Aún no tienes locales. Crea el primero y entrégale su ticket.</div>
+            {displayRooms.length === 0 && (
+              <div className="empty-admin">Aún no tienes salas. Crea una sala o espera actividad de una sala pública.</div>
             )}
 
-            {privateRooms.map((room) => {
+            {displayRooms.map((room) => {
               const status = getRoomStatus(room);
               const days = getDaysToExpire(room);
 
@@ -3089,17 +3221,21 @@ function DevDashboard({
                     </div>
 
                     <div>
-                      <span className={`dev-status dev-status-${status}`}>{getRoomStatusLabel(room)}</span>
+                      <span className={`dev-status dev-status-${status}`}>{room.isPublic ? "Pública" : getRoomStatusLabel(room)}</span>
                       <h3>{room.businessName}</h3>
-                      <p>Ticket: {room.ticket} · Vence: {room.expiresAt || "Sin fecha"}</p>
-                      {days !== null && <small>{days >= 0 ? `Faltan ${days} días` : `Venció hace ${Math.abs(days)} días`}</small>}
+                      <p>Ticket: {room.ticket} · {room.isPublic ? "Sala pública" : `Vence: ${room.expiresAt || "Sin fecha"}`}</p>
+                      {room.isPublic ? (
+                        <small>{room.active ? "Activa en este momento" : "Cerrada"}</small>
+                      ) : (
+                        days !== null && <small>{days >= 0 ? `Faltan ${days} días` : `Venció hace ${Math.abs(days)} días`}</small>
+                      )}
                     </div>
                   </div>
 
                   <div className="dev-room-metrics">
                     <div><span>Canciones</span><strong>{room.stats?.totalSongsPlayed || 0}</strong></div>
-                    <div><span>Sesiones</span><strong>{room.stats?.totalSessions || 0}</strong></div>
-                    <div><span>Usuarios</span><strong>{getActiveUsersForRoom(room.ticket).length}</strong></div>
+                    <div><span>En cola</span><strong>{room.stats?.activeSongs || 0}</strong></div>
+                    <div><span>Usuarios</span><strong>{room.stats?.activeUsers || 0}</strong></div>
                     <div><span>Última actividad</span><strong>{formatTime(room.stats?.lastActivity)}</strong></div>
                   </div>
 
@@ -3107,21 +3243,27 @@ function DevDashboard({
                     <button className="song-action-btn play-now" onClick={() => onOpenRoom(room)} disabled={!isRoomUsable(room)}>
                       <DoorOpen size={15} /> Abrir
                     </button>
-                    <button className="song-action-btn" onClick={() => syncFormFromRoom(room)}>
-                      <Palette size={15} /> Editar
-                    </button>
-                    <button className="song-action-btn" onClick={() => renewPrivateRoom(room.id, 30)}>
-                      <Repeat size={15} /> Renovar 30 días
-                    </button>
-                    <button className="song-action-btn" onClick={() => togglePrivateRoom(room.id)}>
-                      <Zap size={15} /> {room.active ? "Desactivar" : "Activar"}
-                    </button>
+                    {!room.isPublic && (
+                      <>
+                        <button className="song-action-btn" onClick={() => syncFormFromRoom(room)}>
+                          <Palette size={15} /> Editar
+                        </button>
+                        <button className="song-action-btn" onClick={() => renewPrivateRoom(room.id, 30)}>
+                          <Repeat size={15} /> Renovar 30 días
+                        </button>
+                        <button className="song-action-btn" onClick={() => togglePrivateRoom(room.id)}>
+                          <Zap size={15} /> {room.active ? "Desactivar" : "Activar"}
+                        </button>
+                      </>
+                    )}
                     <button className="song-action-btn" onClick={() => copyTicket(room)}>
                       <Eye size={15} /> Copiar ticket
                     </button>
-                    <button className="song-action-btn delete" onClick={() => deletePrivateRoom(room.id)}>
-                      <Trash2 size={15} /> Eliminar
-                    </button>
+                    {!room.isPublic && (
+                      <button className="song-action-btn delete" onClick={() => deletePrivateRoom(room.id)}>
+                        <Trash2 size={15} /> Eliminar
+                      </button>
+                    )}
                   </div>
                 </article>
               );
@@ -3225,7 +3367,7 @@ function DevDashboard({
 
         {devTab === "monitor" && (
           <div className="dev-monitor-grid">
-            {privateRooms.map((room) => (
+            {displayRooms.map((room) => (
               <article className="dev-monitor-card" key={room.id}>
                 <span className={`dev-status dev-status-${getRoomStatus(room)}`}>{getRoomStatusLabel(room)}</span>
                 <h3>{room.businessName}</h3>
@@ -3233,8 +3375,8 @@ function DevDashboard({
                 <div className="dev-room-metrics">
                   <div><span>Canciones</span><strong>{room.stats?.totalSongsPlayed || 0}</strong></div>
                   <div><span>Cantantes</span><strong>{room.stats?.totalSingers || 0}</strong></div>
-                  <div><span>Sesiones</span><strong>{room.stats?.totalSessions || 0}</strong></div>
-                  <div><span>Usuarios activos</span><strong>{getActiveUsersForRoom(room.ticket).length}</strong></div>
+                  <div><span>En cola</span><strong>{room.stats?.activeSongs || 0}</strong></div>
+                  <div><span>Usuarios activos</span><strong>{room.stats?.activeUsers || 0}</strong></div>
                 </div>
               </article>
             ))}
@@ -3264,12 +3406,27 @@ function DevDashboard({
                 <p>Guarda una versión propia/local para que vuelva a aparecer en búsqueda y se reproduzca en TV sin depender de YouTube.</p>
               </div>
 
+              <div className="local-video-upload-row">
+                <button className="song-action-btn play-now" type="button" onClick={() => localVideoInputRef.current?.click()} disabled={localVideoUploading}>
+                  <Upload size={15} /> {localVideoUploading ? "Subiendo MP4..." : "Subir MP4"}
+                </button>
+                <input
+                  ref={localVideoInputRef}
+                  className="promo-file-input"
+                  type="file"
+                  accept="video/mp4,video/webm,video/quicktime"
+                  onChange={(e) => uploadLocalVideoFile(e.target.files?.[0])}
+                />
+                {localVideoForm.localVideoUrl && <small>Video listo: {localVideoForm.localVideoUrl.slice(0, 64)}...</small>}
+              </div>
+
               <div className="local-video-grid">
                 <input value={localVideoForm.title} onChange={(e) => setLocalVideoField("title", e.target.value)} placeholder="Título de la canción" />
                 <input value={localVideoForm.channelTitle} onChange={(e) => setLocalVideoField("channelTitle", e.target.value)} placeholder="Artista / fuente" />
                 <input value={localVideoForm.localVideoUrl} onChange={(e) => setLocalVideoField("localVideoUrl", e.target.value)} placeholder="Ruta local o URL del MP4: /videos/cancion.mp4" />
                 <input value={localVideoForm.searchQuery} onChange={(e) => setLocalVideoField("searchQuery", e.target.value)} placeholder="Palabras de búsqueda: vivir mi vida marc anthony" />
                 <input value={localVideoForm.originalYoutubeId} onChange={(e) => setLocalVideoField("originalYoutubeId", e.target.value)} placeholder="YouTube ID bloqueado opcional" />
+                <input value={localVideoForm.originalUrl} onChange={(e) => setLocalVideoField("originalUrl", e.target.value)} placeholder="URL original opcional: https://youtube.com/watch?v=..." />
                 <input value={localVideoForm.thumbnail} onChange={(e) => setLocalVideoField("thumbnail", e.target.value)} placeholder="Miniatura opcional" />
               </div>
 
@@ -3292,6 +3449,8 @@ function DevDashboard({
                         channelTitle: video.channelTitle || "Biblioteca local",
                         searchQuery: video.title || "",
                         originalYoutubeId: video.youtubeId || "",
+                        originalUrl: video.url || (video.youtubeId ? youtubeUrlFromId(video.youtubeId) : ""),
+                        thumbnail: video.thumbnail || "",
                       }));
                     }}
                   >
@@ -3323,7 +3482,7 @@ function DevDashboard({
                       {video.blocked && <small className="blocked-video-label">Bloqueada: no se pudo reproducir en TV</small>}
                     </div>
 
-                    <button className="song-action-btn play-now" onClick={() => copyYoutubeUrl(video)}>
+                    <button className="song-action-btn play-now" onClick={() => copyVideoUrl(video)}>
                       <Eye size={15} /> Copiar URL
                     </button>
                   </article>
@@ -4559,7 +4718,7 @@ function TvScreen({ roomCode, brandRoom, themeStyle, brandName, brandLogo, curre
   const hasLocalVideo = Boolean(currentSong?.localVideoUrl);
   const hasYoutubeVideo = Boolean(currentSong?.youtubeId && !hasLocalVideo);
   const hasPlayableVideo = hasLocalVideo || hasYoutubeVideo;
-  const shouldPlayMedia = Boolean(playingEnabled && hasPlayableVideo && !showIntro && !youtubeError);
+  const shouldPlayMedia = Boolean(playingEnabled && hasPlayableVideo && !youtubeError);
   const currentIdleItem =
     idleSlideIndex === 0
       ? { type: "qr" }

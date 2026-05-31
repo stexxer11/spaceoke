@@ -6627,3 +6627,59 @@ body.admin-mode .admin-view {
     width: 100%;
   }
 }
+
+
+/* ==================================================
+   DEV PANEL - MONITOREO REAL / VIDEO LOCAL
+   ================================================== */
+
+.local-video-upload-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin: 16px 0;
+  flex-wrap: wrap;
+}
+
+.local-video-upload-row small {
+  color: var(--muted);
+  font-size: 12px;
+  max-width: 100%;
+  overflow-wrap: anywhere;
+}
+
+.blocked-video-chip {
+  text-align: left;
+}
+
+.blocked-video-chip small {
+  display: block;
+  margin-top: 3px;
+  color: rgba(255, 255, 255, 0.62);
+  font-size: 11px;
+}
+
+.youtube-catalog-card h4,
+.youtube-catalog-card p,
+.youtube-catalog-card small {
+  overflow-wrap: anywhere;
+}
+
+@media (max-width: 720px) {
+  .local-video-upload-row {
+    display: grid;
+    grid-template-columns: 1fr;
+  }
+
+  .local-video-grid {
+    grid-template-columns: 1fr !important;
+  }
+
+  .youtube-catalog-card {
+    grid-template-columns: 54px 1fr !important;
+  }
+
+  .youtube-catalog-card .song-action-btn {
+    grid-column: 1 / -1;
+  }
+}

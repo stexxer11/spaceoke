@@ -891,16 +891,21 @@ function App() {
         api.listPromos(roomCode).catch(() => null),
       ]);
 
-      if (session && session.active === false && ["mobile", "admin", "tv", "lobby"].includes(screen)) {
-        await leaveClosedRoom("La sala fue cerrada por el administrador.");
-        return;
-      }
-
       const cleanTicket = makeTicket(roomCode);
       let roomForTheme = currentPrivateRoom || privateRooms.find((room) => room.ticket === cleanTicket) || null;
 
       if (!roomForTheme) {
         roomForTheme = await api.getRoomByTicket(cleanTicket).catch(() => null);
+      }
+
+      if (!session && !roomForTheme && ["mobile", "admin", "tv", "lobby"].includes(screen)) {
+        await leaveClosedRoom("La sala ya no existe. Debes crear una sala nueva para usar ese PIN.");
+        return;
+      }
+
+      if (session && session.active === false && ["mobile", "admin", "tv", "lobby"].includes(screen)) {
+        await leaveClosedRoom("La sala fue cerrada por el administrador. Debes crear una sala nueva para usar otro PIN.");
+        return;
       }
 
       if (roomForTheme) {
@@ -1292,37 +1297,24 @@ function App() {
     const publicCode = makeTicket(input);
     if (!publicCode) return false;
 
+    let session = null;
+
     try {
-      const existingSession = await api.getRoomSession(publicCode);
-      if (existingSession && existingSession.active === false) {
-        openConfirmModal({
-          title: "Sala cerrada",
-          message: "Esta sala pública fue cerrada por el administrador.",
-          confirmText: "Entendido",
-          cancelText: "",
-          danger: true,
-          onConfirm: () => {},
-        });
-        setScreen("home");
-        return true;
-      }
-
-      const session = await api.ensureRoomSession(publicCode, { isPublic: true });
-
-      if (session && session.active === false) {
-        openConfirmModal({
-          title: "Sala cerrada",
-          message: "Esta sala pública fue cerrada por el administrador.",
-          confirmText: "Entendido",
-          cancelText: "",
-          danger: true,
-          onConfirm: () => {},
-        });
-        setScreen("home");
-        return true;
-      }
+      session = await api.getRoomSession(publicCode);
     } catch (error) {
-      console.error("Error preparando sala pública", error);
+      console.error("Error buscando sala pública", error);
+    }
+
+    if (!session) {
+      setRoomClosedNotice("La sala no existe. Verifica el PIN o crea una sala nueva.");
+      setScreen("home");
+      return true;
+    }
+
+    if (session.active === false) {
+      setRoomClosedNotice("Esta sala ya fue cerrada. Debes crear una sala nueva para usar otro PIN.");
+      setScreen("home");
+      return true;
     }
 
     setCurrentPrivateRoom(null);
@@ -1742,7 +1734,7 @@ function App() {
   const joinRoom = async () => {
     const cleanRoomCode = roomCode.trim();
 
-    if (cleanRoomCode.length < 4) return;
+    if (makeTicket(cleanRoomCode).length < 1) return;
 
     showScreenLoading("Buscando sala", "Verificando ticket y preparando tu entrada...");
 
@@ -2204,10 +2196,14 @@ function App() {
   const deleteRoomAndReturnHome = async () => {
     try {
       if (roomCode) {
-        await api.closeRoom(roomCode);
+        if (currentPrivateRoom) {
+          await api.closeRoom(roomCode);
+        } else {
+          await api.deletePublicRoom(roomCode);
+        }
       }
       if (roomCode && playerId) {
-        await api.removeUser(roomCode, playerId);
+        await api.removeUser(roomCode, playerId).catch(() => {});
       }
     } catch (error) {
       console.error("Error cerrando sala", error);
@@ -2230,7 +2226,7 @@ function App() {
   const confirmDeleteRoom = () => {
     openConfirmModal({
       title: "Cerrar sala",
-      message: "Si sales, se cerrará la sala pública y los usuarios volverán a la página principal.",
+      message: "Si sales, se eliminará esta sala pública de la base de datos. Ese PIN ya no servirá y los usuarios volverán al inicio.",
       confirmText: "Cerrar sala",
       cancelText: "Seguir aquí",
       danger: true,

@@ -513,7 +513,6 @@ export function subscribeRoom(ticket, onChange) {
     .on("postgres_changes", { event: "*", schema: "public", table: "songs_queue", filter: `room_ticket=eq.${roomTicket}` }, onChange)
     .on("postgres_changes", { event: "*", schema: "public", table: "room_promos", filter: `room_ticket=eq.${roomTicket}` }, onChange)
     .on("postgres_changes", { event: "*", schema: "public", table: "room_sessions", filter: `room_ticket=eq.${roomTicket}` }, onChange)
-    .on("postgres_changes", { event: "*", schema: "public", table: "room_users", filter: `room_ticket=eq.${roomTicket}` }, onChange)
     .on("postgres_changes", { event: "*", schema: "public", table: "private_rooms", filter: `ticket=eq.${roomTicket}` }, onChange)
     .subscribe();
 
@@ -590,6 +589,35 @@ export async function setRoomPaused(ticket, paused) {
     .single();
   if (error) throw error;
   return sessionToUi(data);
+}
+
+
+export async function deletePublicRoom(ticket) {
+  const roomTicket = makeTicket(ticket);
+
+  await supabase
+    .from("songs_queue")
+    .delete()
+    .eq("room_ticket", roomTicket);
+
+  await supabase
+    .from("room_users")
+    .delete()
+    .eq("room_ticket", roomTicket);
+
+  await supabase
+    .from("room_promos")
+    .delete()
+    .eq("room_ticket", roomTicket);
+
+  const { error } = await supabase
+    .from("room_sessions")
+    .delete()
+    .eq("room_ticket", roomTicket)
+    .eq("is_public", true);
+
+  if (error) throw error;
+  return true;
 }
 
 export async function closeRoom(ticket) {

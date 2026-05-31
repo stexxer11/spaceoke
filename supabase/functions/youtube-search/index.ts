@@ -209,7 +209,7 @@ Deno.serve(async (req: Request) => {
         };
       })
       .filter((video: YoutubeVideoResult) => {
-        return video.youtube_id && looksLikeKaraoke(video);
+        return Boolean(video.youtube_id) && looksLikeKaraoke(video);
       })
       .sort((a: YoutubeVideoResult, b: YoutubeVideoResult) => {
         return scoreVideo(b) - scoreVideo(a);

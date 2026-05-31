@@ -793,6 +793,16 @@ function App() {
     setScreen("home");
   };
 
+  useEffect(() => {
+    if (!roomClosedNotice) return;
+
+    const timer = setTimeout(() => {
+      setRoomClosedNotice(null);
+    }, 5200);
+
+    return () => clearTimeout(timer);
+  }, [roomClosedNotice]);
+
 
   useEffect(() => {
     if (screen === "admin") {
@@ -2421,10 +2431,26 @@ function App() {
       )}
 
       {screen === "home" && roomClosedNotice && (
-        <div className="room-closed-toast">
-          <strong>Sala cerrada</strong>
-          <span>{roomClosedNotice}</span>
-          <button onClick={() => setRoomClosedNotice(null)}>Entendido</button>
+        <div className="room-closed-toast" role="status" aria-live="polite">
+          <div className="room-closed-toast-icon">
+            <LogOut size={18} />
+          </div>
+
+          <div className="room-closed-toast-copy">
+            <strong>Sala cerrada</strong>
+            <span>{roomClosedNotice}</span>
+          </div>
+
+          <button
+            type="button"
+            className="room-closed-toast-close"
+            onClick={() => setRoomClosedNotice(null)}
+            aria-label="Cerrar notificación"
+          >
+            Entendido
+          </button>
+
+          <div className="room-closed-toast-progress" />
         </div>
       )}
 
@@ -4373,6 +4399,7 @@ function LocalVideoPlayer({ song, shouldPlay, tvActivated, onReadyChange, onErro
         src={song.localVideoUrl}
         controls
         playsInline
+        preload="auto"
         onCanPlay={() => onReadyChange(true)}
         onError={() => onError("No se pudo cargar el video local. Revisa que el archivo exista.")}
       />
@@ -4415,9 +4442,11 @@ function YouTubeSmartPlayer({ song, shouldPlay, shouldWarmup, tvActivated, onRea
   );
   const playerRef = useRef(null);
   const mountedRef = useRef(true);
+  const [playerReady, setPlayerReady] = useState(false);
 
   useEffect(() => {
     mountedRef.current = true;
+    setPlayerReady(false);
     onReadyChange(false);
     onError("");
 
@@ -4458,6 +4487,7 @@ function YouTubeSmartPlayer({ song, shouldPlay, shouldWarmup, tvActivated, onRea
                 console.warn("No se pudo preparar el video", error);
               }
 
+              setPlayerReady(true);
               onReadyChange(true);
             },
             onError: () => {
@@ -4486,7 +4516,7 @@ function YouTubeSmartPlayer({ song, shouldPlay, shouldWarmup, tvActivated, onRea
   }, [song?.youtubeId, song?.id, song?.repeatKey]);
 
   useEffect(() => {
-    if (!playerRef.current || !tvActivated) return;
+    if (!playerRef.current || !tvActivated || !playerReady) return;
 
     try {
       if (shouldPlay) {
@@ -4495,24 +4525,19 @@ function YouTubeSmartPlayer({ song, shouldPlay, shouldWarmup, tvActivated, onRea
         playerRef.current.setPlaybackQuality?.("hd1080");
         playerRef.current.playVideo();
       } else if (shouldWarmup) {
+        // Precarga real durante la cuenta 4, 3, 2, 1.
+        // El video ya se mueve detrás de la intro, pero queda silenciado hasta que termina el conteo.
         playerRef.current.mute?.();
+        playerRef.current.setVolume?.(0);
+        playerRef.current.setPlaybackQuality?.("hd1080");
         playerRef.current.playVideo();
-        setTimeout(() => {
-          try {
-            playerRef.current?.pauseVideo?.();
-            playerRef.current?.unMute?.();
-            playerRef.current?.setVolume?.(100);
-          } catch (error) {
-            console.warn("No se pudo pausar precarga", error);
-          }
-        }, 450);
       } else {
-        playerRef.current.pauseVideo();
+        playerRef.current.pauseVideo?.();
       }
     } catch (error) {
       console.warn("No se pudo controlar YouTube", error);
     }
-  }, [shouldPlay, shouldWarmup, tvActivated, song?.youtubeId, song?.id, song?.repeatKey]);
+  }, [shouldPlay, shouldWarmup, tvActivated, playerReady, song?.youtubeId, song?.id, song?.repeatKey]);
 
   return (
     <div className="youtube-video-frame youtube-smart-frame">
@@ -4703,7 +4728,7 @@ function TvScreen({ roomCode, brandRoom, themeStyle, brandName, brandLogo, curre
                     <YouTubeSmartPlayer
                       song={currentSong}
                       shouldPlay={shouldPlayMedia}
-                      shouldWarmup={Boolean(playingEnabled && showIntro)}
+                      shouldWarmup={Boolean(playingEnabled && showIntro && hasYoutubeVideo && !youtubeError)}
                       tvActivated={tvActivated}
                       onReadyChange={setYoutubeReady}
                       onError={handleYoutubeError}

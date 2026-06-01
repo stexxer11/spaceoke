@@ -2665,6 +2665,7 @@ function App() {
           promoSlides={promoSlides}
           karaokePaused={karaokePaused}
           onVideoPlaybackError={handleVideoPlaybackErrorAndSkip}
+          onVideoEnded={nextSong}
           onBack={openQrInNewTab}
         />
       )}
@@ -4527,7 +4528,7 @@ function PromoTvSlide({ promoSettings, roomUrl, roomCode }) {
 }
 
 
-function LocalVideoPlayer({ song, shouldPlay, tvActivated, onReadyChange, onError }) {
+function LocalVideoPlayer({ song, shouldPlay, tvActivated, onReadyChange, onError, onEnded }) {
   const videoRef = useRef(null);
 
   useEffect(() => {
@@ -4539,6 +4540,8 @@ function LocalVideoPlayer({ song, shouldPlay, tvActivated, onReadyChange, onErro
     if (!video || !tvActivated) return;
 
     if (shouldPlay) {
+      video.muted = false;
+      video.volume = 1;
       video.play().catch(() => {
         onError("No se pudo iniciar el video local. Revisa la ruta del archivo.");
       });
@@ -4552,10 +4555,11 @@ function LocalVideoPlayer({ song, shouldPlay, tvActivated, onReadyChange, onErro
       <video
         ref={videoRef}
         src={song.localVideoUrl}
-        controls
+        controls={false}
         playsInline
         preload="auto"
         onCanPlay={() => onReadyChange(true)}
+        onEnded={() => onEnded?.()}
         onError={() => onError("No se pudo cargar el video local. Revisa que el archivo exista.")}
       />
     </div>
@@ -4591,16 +4595,59 @@ function loadYouTubeIframeApi() {
   });
 }
 
-function YouTubeSmartPlayer({ song, shouldPlay, shouldWarmup, tvActivated, onReadyChange, onError }) {
+function YouTubeSmartPlayer({
+  song,
+  shouldPlay,
+  shouldWarmup,
+  tvActivated,
+  onReadyChange,
+  onError,
+  onEnded,
+}) {
   const containerIdRef = useRef(
     `yt-player-${Date.now()}-${Math.random().toString(36).slice(2)}`
   );
   const playerRef = useRef(null);
   const mountedRef = useRef(true);
   const [playerReady, setPlayerReady] = useState(false);
+  const endedReportedRef = useRef(false);
+  const actionRetryRef = useRef(null);
+
+  const safeCall = (callback) => {
+    try {
+      callback?.();
+    } catch (error) {
+      console.warn("No se pudo controlar YouTube", error);
+    }
+  };
+
+  const warmupVideo = () => {
+    const player = playerRef.current;
+    if (!player || !tvActivated || !playerReady) return;
+
+    safeCall(() => {
+      player.mute?.();
+      player.setVolume?.(0);
+      player.setPlaybackQuality?.("hd1080");
+      player.playVideo?.();
+    });
+  };
+
+  const playVideoWithSound = () => {
+    const player = playerRef.current;
+    if (!player || !tvActivated || !playerReady) return;
+
+    safeCall(() => {
+      player.unMute?.();
+      player.setVolume?.(100);
+      player.setPlaybackQuality?.("hd1080");
+      player.playVideo?.();
+    });
+  };
 
   useEffect(() => {
     mountedRef.current = true;
+    endedReportedRef.current = false;
     setPlayerReady(false);
     onReadyChange(false);
     onError("");
@@ -4622,28 +4669,48 @@ function YouTubeSmartPlayer({ song, shouldPlay, shouldWarmup, tvActivated, onRea
           width: "100%",
           height: "100%",
           playerVars: {
-            autoplay: 0,
-            controls: 1,
+            autoplay: 1,
+            mute: 1,
+            controls: 0,
+            disablekb: 1,
+            fs: 0,
             rel: 0,
             modestbranding: 1,
             playsinline: 1,
             enablejsapi: 1,
+            iv_load_policy: 3,
+            cc_load_policy: 0,
             origin: window.location.origin,
           },
           events: {
             onReady: (event) => {
               if (!mountedRef.current) return;
 
-              try {
+              safeCall(() => {
+                event.target.mute?.();
+                event.target.setVolume?.(0);
                 event.target.setPlaybackQuality?.("hd1080");
-                event.target.cueVideoById({ videoId: song.youtubeId, suggestedQuality: "hd1080" });
-                event.target.setVolume(100);
-              } catch (error) {
-                console.warn("No se pudo preparar el video", error);
-              }
+                event.target.loadVideoById({
+                  videoId: song.youtubeId,
+                  suggestedQuality: "hd1080",
+                });
+                event.target.playVideo?.();
+              });
 
               setPlayerReady(true);
               onReadyChange(true);
+            },
+            onStateChange: (event) => {
+              if (!mountedRef.current || !window.YT) return;
+
+              if (event.data === window.YT.PlayerState.PLAYING) {
+                onReadyChange(true);
+              }
+
+              if (event.data === window.YT.PlayerState.ENDED && !endedReportedRef.current) {
+                endedReportedRef.current = true;
+                onEnded?.();
+              }
             },
             onError: () => {
               if (!mountedRef.current) return;
@@ -4661,11 +4728,18 @@ function YouTubeSmartPlayer({ song, shouldPlay, shouldWarmup, tvActivated, onRea
       cancelled = true;
       mountedRef.current = false;
       onReadyChange(false);
+
+      if (actionRetryRef.current) {
+        clearInterval(actionRetryRef.current);
+        actionRetryRef.current = null;
+      }
+
       try {
         playerRef.current?.destroy?.();
       } catch (error) {
         console.warn("No se pudo destruir el reproductor", error);
       }
+
       playerRef.current = null;
     };
   }, [song?.youtubeId, song?.id, song?.repeatKey]);
@@ -4673,25 +4747,59 @@ function YouTubeSmartPlayer({ song, shouldPlay, shouldWarmup, tvActivated, onRea
   useEffect(() => {
     if (!playerRef.current || !tvActivated || !playerReady) return;
 
-    try {
-      if (shouldPlay) {
-        playerRef.current.unMute?.();
-        playerRef.current.setVolume?.(100);
-        playerRef.current.setPlaybackQuality?.("hd1080");
-        playerRef.current.playVideo();
-      } else if (shouldWarmup) {
-        // Precarga real durante la cuenta 4, 3, 2, 1.
-        // El video ya se mueve detrás de la intro, pero queda silenciado hasta que termina el conteo.
-        playerRef.current.mute?.();
-        playerRef.current.setVolume?.(0);
-        playerRef.current.setPlaybackQuality?.("hd1080");
-        playerRef.current.playVideo();
-      } else {
-        playerRef.current.pauseVideo?.();
-      }
-    } catch (error) {
-      console.warn("No se pudo controlar YouTube", error);
+    if (actionRetryRef.current) {
+      clearInterval(actionRetryRef.current);
+      actionRetryRef.current = null;
     }
+
+    const applyAction = () => {
+      if (!playerRef.current) return;
+
+      if (shouldPlay) {
+        playVideoWithSound();
+        return;
+      }
+
+      if (shouldWarmup) {
+        warmupVideo();
+        return;
+      }
+
+      safeCall(() => {
+        playerRef.current.pauseVideo?.();
+      });
+    };
+
+    applyAction();
+
+    // YouTube a veces ignora el primer playVideo si el iframe todavía está preparando.
+    // Reintentar unos segundos evita que quede el logo/play de YouTube esperando clic.
+    if (shouldPlay || shouldWarmup) {
+      let attempts = 0;
+      actionRetryRef.current = setInterval(() => {
+        attempts += 1;
+
+        const state = playerRef.current?.getPlayerState?.();
+        const isMoving =
+          state === window.YT?.PlayerState?.PLAYING ||
+          state === window.YT?.PlayerState?.BUFFERING;
+
+        if (isMoving || attempts >= 12) {
+          clearInterval(actionRetryRef.current);
+          actionRetryRef.current = null;
+          return;
+        }
+
+        applyAction();
+      }, 350);
+    }
+
+    return () => {
+      if (actionRetryRef.current) {
+        clearInterval(actionRetryRef.current);
+        actionRetryRef.current = null;
+      }
+    };
   }, [shouldPlay, shouldWarmup, tvActivated, playerReady, song?.youtubeId, song?.id, song?.repeatKey]);
 
   return (
@@ -4701,14 +4809,14 @@ function YouTubeSmartPlayer({ song, shouldPlay, shouldWarmup, tvActivated, onRea
   );
 }
 
-function TvScreen({ roomCode, brandRoom, themeStyle, brandName, brandLogo, currentSong, promoSlides, karaokePaused, onVideoPlaybackError, onBack }) {
+function TvScreen({ roomCode, brandRoom, themeStyle, brandName, brandLogo, currentSong, promoSlides, karaokePaused, onVideoPlaybackError, onVideoEnded, onBack }) {
   const roomUrl = `${window.location.origin}/sala/${roomCode}`;
   const activePromos = (promoSlides || []).filter((promo) => promo.enabled);
   const [showTvOverlay, setShowTvOverlay] = useState(true);
   const [showIntro, setShowIntro] = useState(Boolean(currentSong && !karaokePaused));
   const [countdown, setCountdown] = useState(INTRO_SECONDS);
   const [idleSlideIndex, setIdleSlideIndex] = useState(0);
-  const [tvActivated, setTvActivated] = useState(false);
+  const [tvActivated, setTvActivated] = useState(() => localStorage.getItem("spaceoke_tv_activated") === "true");
   const [youtubeReady, setYoutubeReady] = useState(false);
   const [youtubeError, setYoutubeError] = useState("");
   const hideTimerRef = useRef(null);
@@ -4718,7 +4826,8 @@ function TvScreen({ roomCode, brandRoom, themeStyle, brandName, brandLogo, curre
   const hasLocalVideo = Boolean(currentSong?.localVideoUrl);
   const hasYoutubeVideo = Boolean(currentSong?.youtubeId && !hasLocalVideo);
   const hasPlayableVideo = hasLocalVideo || hasYoutubeVideo;
-  const shouldPlayMedia = Boolean(playingEnabled && hasPlayableVideo && !youtubeError);
+  const shouldPlayMedia = Boolean(playingEnabled && hasPlayableVideo && !showIntro && !youtubeError);
+  const shouldWarmupMedia = Boolean(playingEnabled && hasPlayableVideo && showIntro && !youtubeError);
   const currentIdleItem =
     idleSlideIndex === 0
       ? { type: "qr" }
@@ -4745,6 +4854,7 @@ function TvScreen({ roomCode, brandRoom, themeStyle, brandName, brandLogo, curre
   };
 
   const activateTvPlayback = () => {
+    localStorage.setItem("spaceoke_tv_activated", "true");
     setTvActivated(true);
     resetTvOverlay();
   };
@@ -4878,15 +4988,17 @@ function TvScreen({ roomCode, brandRoom, themeStyle, brandName, brandLogo, curre
                       tvActivated={tvActivated}
                       onReadyChange={setYoutubeReady}
                       onError={handleYoutubeError}
+                      onEnded={onVideoEnded}
                     />
                   ) : (
                     <YouTubeSmartPlayer
                       song={currentSong}
                       shouldPlay={shouldPlayMedia}
-                      shouldWarmup={Boolean(playingEnabled && showIntro && hasYoutubeVideo && !youtubeError)}
+                      shouldWarmup={shouldWarmupMedia}
                       tvActivated={tvActivated}
                       onReadyChange={setYoutubeReady}
                       onError={handleYoutubeError}
+                      onEnded={onVideoEnded}
                     />
                   )}
 

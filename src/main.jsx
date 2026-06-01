@@ -1651,6 +1651,8 @@ function App() {
     done: history.filter((song) => song.status === "done").length,
     noShow: history.filter((song) => song.status === "no_show").length,
     cancelled: history.filter((song) => song.status === "cancelled").length,
+    skipped: history.filter((song) => song.status === "skipped").length,
+    videoError: history.filter((song) => song.status === "video_error").length,
     singers: new Set(
       queue
         .filter((song) => song.status === "done" || song.status === "playing")
@@ -4051,7 +4053,7 @@ function AdminScreen({
           </div>
         </div>
 
-        <div className="stats-grid">
+        <div className="stats-grid stats-grid-admin-full">
           <div>
             <span>Activas</span>
             <strong>{stats.active}</strong>
@@ -4063,8 +4065,23 @@ function AdminScreen({
           </div>
 
           <div>
-            <span>Ausentes</span>
+            <span>Canceladas</span>
+            <strong>{stats.cancelled}</strong>
+          </div>
+
+          <div>
+            <span>No apareció</span>
             <strong>{stats.noShow}</strong>
+          </div>
+
+          <div>
+            <span>Saltadas</span>
+            <strong>{stats.skipped}</strong>
+          </div>
+
+          <div>
+            <span>Error video</span>
+            <strong>{stats.videoError}</strong>
           </div>
 
           <div>
@@ -4540,8 +4557,6 @@ function LocalVideoPlayer({ song, shouldPlay, tvActivated, onReadyChange, onErro
     if (!video || !tvActivated) return;
 
     if (shouldPlay) {
-      video.muted = false;
-      video.volume = 1;
       video.play().catch(() => {
         onError("No se pudo iniciar el video local. Revisa la ruta del archivo.");
       });
@@ -4595,59 +4610,16 @@ function loadYouTubeIframeApi() {
   });
 }
 
-function YouTubeSmartPlayer({
-  song,
-  shouldPlay,
-  shouldWarmup,
-  tvActivated,
-  onReadyChange,
-  onError,
-  onEnded,
-}) {
+function YouTubeSmartPlayer({ song, shouldPlay, shouldWarmup, tvActivated, onReadyChange, onError, onEnded }) {
   const containerIdRef = useRef(
     `yt-player-${Date.now()}-${Math.random().toString(36).slice(2)}`
   );
   const playerRef = useRef(null);
   const mountedRef = useRef(true);
   const [playerReady, setPlayerReady] = useState(false);
-  const endedReportedRef = useRef(false);
-  const actionRetryRef = useRef(null);
-
-  const safeCall = (callback) => {
-    try {
-      callback?.();
-    } catch (error) {
-      console.warn("No se pudo controlar YouTube", error);
-    }
-  };
-
-  const warmupVideo = () => {
-    const player = playerRef.current;
-    if (!player || !tvActivated || !playerReady) return;
-
-    safeCall(() => {
-      player.mute?.();
-      player.setVolume?.(0);
-      player.setPlaybackQuality?.("hd1080");
-      player.playVideo?.();
-    });
-  };
-
-  const playVideoWithSound = () => {
-    const player = playerRef.current;
-    if (!player || !tvActivated || !playerReady) return;
-
-    safeCall(() => {
-      player.unMute?.();
-      player.setVolume?.(100);
-      player.setPlaybackQuality?.("hd1080");
-      player.playVideo?.();
-    });
-  };
 
   useEffect(() => {
     mountedRef.current = true;
-    endedReportedRef.current = false;
     setPlayerReady(false);
     onReadyChange(false);
     onError("");
@@ -4672,43 +4644,36 @@ function YouTubeSmartPlayer({
             autoplay: 1,
             mute: 1,
             controls: 0,
-            disablekb: 1,
-            fs: 0,
             rel: 0,
             modestbranding: 1,
             playsinline: 1,
             enablejsapi: 1,
+            disablekb: 1,
+            fs: 0,
             iv_load_policy: 3,
-            cc_load_policy: 0,
             origin: window.location.origin,
           },
           events: {
             onReady: (event) => {
               if (!mountedRef.current) return;
 
-              safeCall(() => {
+              try {
                 event.target.mute?.();
                 event.target.setVolume?.(0);
                 event.target.setPlaybackQuality?.("hd1080");
-                event.target.loadVideoById({
-                  videoId: song.youtubeId,
-                  suggestedQuality: "hd1080",
-                });
+                event.target.loadVideoById({ videoId: song.youtubeId, suggestedQuality: "hd1080" });
                 event.target.playVideo?.();
-              });
+              } catch (error) {
+                console.warn("No se pudo preparar el video", error);
+              }
 
               setPlayerReady(true);
               onReadyChange(true);
             },
             onStateChange: (event) => {
-              if (!mountedRef.current || !window.YT) return;
-
-              if (event.data === window.YT.PlayerState.PLAYING) {
-                onReadyChange(true);
-              }
-
-              if (event.data === window.YT.PlayerState.ENDED && !endedReportedRef.current) {
-                endedReportedRef.current = true;
+              if (!mountedRef.current) return;
+              const YT = window.YT;
+              if (YT?.PlayerState && event.data === YT.PlayerState.ENDED) {
                 onEnded?.();
               }
             },
@@ -4728,18 +4693,11 @@ function YouTubeSmartPlayer({
       cancelled = true;
       mountedRef.current = false;
       onReadyChange(false);
-
-      if (actionRetryRef.current) {
-        clearInterval(actionRetryRef.current);
-        actionRetryRef.current = null;
-      }
-
       try {
         playerRef.current?.destroy?.();
       } catch (error) {
         console.warn("No se pudo destruir el reproductor", error);
       }
-
       playerRef.current = null;
     };
   }, [song?.youtubeId, song?.id, song?.repeatKey]);
@@ -4747,58 +4705,40 @@ function YouTubeSmartPlayer({
   useEffect(() => {
     if (!playerRef.current || !tvActivated || !playerReady) return;
 
-    if (actionRetryRef.current) {
-      clearInterval(actionRetryRef.current);
-      actionRetryRef.current = null;
-    }
+    let retryTimer = null;
+    let attempts = 0;
 
-    const applyAction = () => {
+    const forcePlay = () => {
       if (!playerRef.current) return;
+      try {
+        playerRef.current.setPlaybackQuality?.("hd1080");
 
-      if (shouldPlay) {
-        playVideoWithSound();
-        return;
-      }
-
-      if (shouldWarmup) {
-        warmupVideo();
-        return;
-      }
-
-      safeCall(() => {
-        playerRef.current.pauseVideo?.();
-      });
-    };
-
-    applyAction();
-
-    // YouTube a veces ignora el primer playVideo si el iframe todavía está preparando.
-    // Reintentar unos segundos evita que quede el logo/play de YouTube esperando clic.
-    if (shouldPlay || shouldWarmup) {
-      let attempts = 0;
-      actionRetryRef.current = setInterval(() => {
-        attempts += 1;
-
-        const state = playerRef.current?.getPlayerState?.();
-        const isMoving =
-          state === window.YT?.PlayerState?.PLAYING ||
-          state === window.YT?.PlayerState?.BUFFERING;
-
-        if (isMoving || attempts >= 12) {
-          clearInterval(actionRetryRef.current);
-          actionRetryRef.current = null;
+        if (shouldPlay) {
+          playerRef.current.unMute?.();
+          playerRef.current.setVolume?.(100);
+        } else if (shouldWarmup) {
+          playerRef.current.mute?.();
+          playerRef.current.setVolume?.(0);
+        } else {
+          playerRef.current.pauseVideo?.();
           return;
         }
 
-        applyAction();
-      }, 350);
-    }
+        playerRef.current.playVideo?.();
+      } catch (error) {
+        console.warn("No se pudo controlar YouTube", error);
+      }
+
+      attempts += 1;
+      if ((shouldPlay || shouldWarmup) && attempts < 8) {
+        retryTimer = setTimeout(forcePlay, 450);
+      }
+    };
+
+    forcePlay();
 
     return () => {
-      if (actionRetryRef.current) {
-        clearInterval(actionRetryRef.current);
-        actionRetryRef.current = null;
-      }
+      if (retryTimer) clearTimeout(retryTimer);
     };
   }, [shouldPlay, shouldWarmup, tvActivated, playerReady, song?.youtubeId, song?.id, song?.repeatKey]);
 
@@ -4816,7 +4756,7 @@ function TvScreen({ roomCode, brandRoom, themeStyle, brandName, brandLogo, curre
   const [showIntro, setShowIntro] = useState(Boolean(currentSong && !karaokePaused));
   const [countdown, setCountdown] = useState(INTRO_SECONDS);
   const [idleSlideIndex, setIdleSlideIndex] = useState(0);
-  const [tvActivated, setTvActivated] = useState(() => localStorage.getItem("spaceoke_tv_activated") === "true");
+  const [tvActivated, setTvActivated] = useState(true);
   const [youtubeReady, setYoutubeReady] = useState(false);
   const [youtubeError, setYoutubeError] = useState("");
   const hideTimerRef = useRef(null);
@@ -4854,7 +4794,6 @@ function TvScreen({ roomCode, brandRoom, themeStyle, brandName, brandLogo, curre
   };
 
   const activateTvPlayback = () => {
-    localStorage.setItem("spaceoke_tv_activated", "true");
     setTvActivated(true);
     resetTvOverlay();
   };
@@ -4945,23 +4884,7 @@ function TvScreen({ roomCode, brandRoom, themeStyle, brandName, brandLogo, curre
     >
       <div className="tv-ambient" />
 
-      {!tvActivated && (
-        <div className="tv-activation-layer">
-          <div className="tv-activation-card">
-            <div className="mk-modal-icon">
-              <Play size={30} />
-            </div>
-            <h2>Activar TV</h2>
-            <p>
-              Toca una vez para permitir que SPACEOKE reproduzca los videos automáticamente durante el evento.
-            </p>
-            <button className="btn primary" onClick={activateTvPlayback}>
-              <Play size={18} />
-              Activar reproducción
-            </button>
-          </div>
-        </div>
-      )}
+      {false && !tvActivated && null}
 
       <button
         className={`tv-exit tv-overlay-ui ${

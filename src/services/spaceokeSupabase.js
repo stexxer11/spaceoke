@@ -1197,3 +1197,65 @@ async function incrementSongPlayed(ticket) {
       .then(() => null);
   }
 }
+
+
+/* =========================================================
+   ALIASES PARA DEV PANEL / COMPATIBILIDAD MAIN.JSX
+   ========================================================= */
+
+export async function listRoomsOverview() {
+  if (typeof listDevDashboardData === "function") {
+    const data = await listDevDashboardData();
+    const snapshots = data.snapshots || [];
+    const privateRooms = data.privateRooms || [];
+
+    const privateCards = privateRooms.map((room) => {
+      const snap = snapshots.find((item) => item.ticket === room.ticket);
+      return {
+        ...room,
+        roomType: "private",
+        isPrivate: true,
+        activeUsers: snap?.users?.length || 0,
+        activeSongs: snap?.activeQueue?.length || 0,
+        historySongs: snap?.history?.length || 0,
+        currentSong: snap?.currentSong || null,
+      };
+    });
+
+    const publicCards = snapshots
+      .filter((snap) => !snap.isPrivate)
+      .map((snap) => ({
+        id: snap.session?.id || snap.ticket,
+        ticket: snap.ticket,
+        businessName: `Sala pública ${snap.ticket}`,
+        publicTitle: "Karaoke público",
+        slogan: "Sala creada desde la página principal",
+        logo: "",
+        active: Boolean(snap.session?.active),
+        roomType: "public",
+        isPrivate: false,
+        expiresAt: null,
+        stats: {
+          totalSongsPlayed: snap.session?.totalSongsPlayed || snap.stats?.done || 0,
+          totalSingers: snap.stats?.singers || 0,
+          totalSessions: snap.session?.totalSessions || 1,
+          lastActivity: snap.session?.lastActivity || snap.session?.updatedAt || null,
+        },
+        activeUsers: snap.users?.length || 0,
+        activeSongs: snap.activeQueue?.length || 0,
+        historySongs: snap.history?.length || 0,
+        currentSong: snap.currentSong || null,
+      }));
+
+    return [...privateCards, ...publicCards];
+  }
+
+  return listPrivateRooms();
+}
+
+export function subscribeDevDashboard(onChange) {
+  if (typeof subscribeDevPanel === "function") {
+    return subscribeDevPanel(onChange);
+  }
+  return () => {};
+}

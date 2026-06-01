@@ -892,6 +892,49 @@ export async function closeRoom(ticket, options = {}) {
 }
 
 
+
+async function promoteNextQueued(ticket) {
+  const roomTicket = makeTicket(ticket);
+  const now = new Date().toISOString();
+
+  const { data: nextSong, error: findError } = await supabase
+    .from("songs_queue")
+    .select("*")
+    .eq("room_ticket", roomTicket)
+    .eq("status", "queued")
+    .order("requested_at", { ascending: true })
+    .limit(1)
+    .maybeSingle();
+
+  if (findError) throw findError;
+  if (!nextSong) return null;
+
+  const { data, error } = await supabase
+    .from("songs_queue")
+    .update({
+      status: "playing",
+      started_at: now,
+      ended_at: null,
+    })
+    .eq("id", nextSong.id)
+    .select("*")
+    .single();
+
+  if (error) throw error;
+
+  await supabase
+    .from("room_sessions")
+    .update({ updated_at: now })
+    .eq("room_ticket", roomTicket);
+
+  await supabase
+    .from("private_rooms")
+    .update({ last_activity: now })
+    .eq("ticket", roomTicket);
+
+  return songToUi(data);
+}
+
 export async function cancelSongAndPromote(ticket, songId) {
   const roomTicket = makeTicket(ticket);
   const now = new Date().toISOString();

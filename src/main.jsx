@@ -2664,6 +2664,7 @@ function App() {
           brandName={brandName}
           brandLogo={brandLogo}
           currentSong={currentSong}
+          nextSongToPreload={activeQueue.find((song) => song.status === "queued") || null}
           promoSlides={promoSlides}
           karaokePaused={karaokePaused}
           onVideoPlaybackError={handleVideoPlaybackErrorAndSkip}
@@ -4545,10 +4546,12 @@ function PromoTvSlide({ promoSettings, roomUrl, roomCode }) {
 }
 
 
-function LocalVideoPlayer({ song, shouldPlay, tvActivated, onReadyChange, onError, onEnded }) {
+function LocalVideoPlayer({ song, shouldPlay, tvActivated, onReadyChange, onError, onEnded, onNearEnd }) {
   const videoRef = useRef(null);
+  const nearEndReportedRef = useRef(false);
 
   useEffect(() => {
+    nearEndReportedRef.current = false;
     onReadyChange(Boolean(song?.localVideoUrl));
   }, [song?.localVideoUrl, song?.id, song?.repeatKey]);
 
@@ -4574,6 +4577,15 @@ function LocalVideoPlayer({ song, shouldPlay, tvActivated, onReadyChange, onErro
         playsInline
         preload="auto"
         onCanPlay={() => onReadyChange(true)}
+        onTimeUpdate={(event) => {
+          const video = event.currentTarget;
+          if (!video?.duration || nearEndReportedRef.current) return;
+          const remaining = video.duration - video.currentTime;
+          if (remaining <= 20 && remaining > 0) {
+            nearEndReportedRef.current = true;
+            onNearEnd?.();
+          }
+        }}
         onEnded={() => onEnded?.()}
         onError={() => onError("No se pudo cargar el video local. Revisa que el archivo exista.")}
       />
@@ -4610,17 +4622,19 @@ function loadYouTubeIframeApi() {
   });
 }
 
-function YouTubeSmartPlayer({ song, shouldPlay, shouldWarmup, tvActivated, onReadyChange, onError, onEnded }) {
+function YouTubeSmartPlayer({ song, shouldPlay, shouldWarmup, tvActivated, keepAliveTick, onReadyChange, onError, onEnded, onNearEnd }) {
   const containerIdRef = useRef(
     `yt-player-${Date.now()}-${Math.random().toString(36).slice(2)}`
   );
   const playerRef = useRef(null);
   const mountedRef = useRef(true);
+  const nearEndReportedRef = useRef(false);
   const [playerReady, setPlayerReady] = useState(false);
 
   useEffect(() => {
     mountedRef.current = true;
     setPlayerReady(false);
+    nearEndReportedRef.current = false;
     onReadyChange(false);
     onError("");
 
@@ -4742,6 +4756,45 @@ function YouTubeSmartPlayer({ song, shouldPlay, shouldWarmup, tvActivated, onRea
     };
   }, [shouldPlay, shouldWarmup, tvActivated, playerReady, song?.youtubeId, song?.id, song?.repeatKey]);
 
+
+  useEffect(() => {
+    if (!playerRef.current || !playerReady || !tvActivated) return;
+
+    try {
+      playerRef.current.getPlayerState?.();
+      playerRef.current.setPlaybackQuality?.("hd1080");
+
+      if (shouldPlay || shouldWarmup) {
+        playerRef.current.playVideo?.();
+      }
+    } catch (error) {
+      console.warn("Keep alive de YouTube falló", error);
+    }
+  }, [keepAliveTick, playerReady, tvActivated, shouldPlay, shouldWarmup]);
+
+  useEffect(() => {
+    if (!playerRef.current || !playerReady || !shouldPlay) return;
+
+    const interval = setInterval(() => {
+      if (!playerRef.current || nearEndReportedRef.current) return;
+
+      try {
+        const duration = Number(playerRef.current.getDuration?.() || 0);
+        const currentTime = Number(playerRef.current.getCurrentTime?.() || 0);
+        const remaining = duration - currentTime;
+
+        if (duration > 0 && remaining <= 20 && remaining > 0) {
+          nearEndReportedRef.current = true;
+          onNearEnd?.();
+        }
+      } catch (error) {
+        console.warn("No se pudo leer el tiempo de YouTube", error);
+      }
+    }, 1500);
+
+    return () => clearInterval(interval);
+  }, [playerReady, shouldPlay, song?.youtubeId, song?.id, song?.repeatKey]);
+
   return (
     <div className="youtube-video-frame youtube-smart-frame">
       <div id={containerIdRef.current} className="youtube-player-node" />
@@ -4749,7 +4802,7 @@ function YouTubeSmartPlayer({ song, shouldPlay, shouldWarmup, tvActivated, onRea
   );
 }
 
-function TvScreen({ roomCode, brandRoom, themeStyle, brandName, brandLogo, currentSong, promoSlides, karaokePaused, onVideoPlaybackError, onVideoEnded, onBack }) {
+function TvScreen({ roomCode, brandRoom, themeStyle, brandName, brandLogo, currentSong, nextSongToPreload, promoSlides, karaokePaused, onVideoPlaybackError, onVideoEnded, onBack }) {
   const roomUrl = `${window.location.origin}/sala/${roomCode}`;
   const activePromos = (promoSlides || []).filter((promo) => promo.enabled);
   const [showTvOverlay, setShowTvOverlay] = useState(true);
@@ -4761,6 +4814,10 @@ function TvScreen({ roomCode, brandRoom, themeStyle, brandName, brandLogo, curre
   const [youtubeError, setYoutubeError] = useState("");
   const hideTimerRef = useRef(null);
   const reportedYoutubeErrorRef = useRef(null);
+  const keepAliveButtonRef = useRef(null);
+  const wakeLockRef = useRef(null);
+  const [keepAliveTick, setKeepAliveTick] = useState(0);
+  const [prepareNextNow, setPrepareNextNow] = useState(false);
 
   const playingEnabled = Boolean(currentSong && !karaokePaused);
   const hasLocalVideo = Boolean(currentSong?.localVideoUrl);
@@ -4776,9 +4833,45 @@ function TvScreen({ roomCode, brandRoom, themeStyle, brandName, brandLogo, curre
   useEffect(() => {
     document.body.classList.add("tv-mode");
 
+    const requestWakeLock = async () => {
+      try {
+        if ("wakeLock" in navigator) {
+          wakeLockRef.current = await navigator.wakeLock.request("screen");
+        }
+      } catch (error) {
+        console.warn("Wake Lock no disponible", error);
+      }
+    };
+
+    requestWakeLock();
+
+    const handleVisibility = () => {
+      if (document.visibilityState === "visible") {
+        requestWakeLock();
+      }
+    };
+
+    document.addEventListener("visibilitychange", handleVisibility);
+
     return () => {
       document.body.classList.remove("tv-mode");
+      document.removeEventListener("visibilitychange", handleVisibility);
+      try {
+        wakeLockRef.current?.release?.();
+      } catch (error) {
+        console.warn("No se pudo soltar Wake Lock", error);
+      }
+      wakeLockRef.current = null;
     };
+  }, []);
+
+  useEffect(() => {
+    const interval = setInterval(() => {
+      setKeepAliveTick((value) => value + 1);
+      keepAliveButtonRef.current?.click?.();
+    }, 40000);
+
+    return () => clearInterval(interval);
   }, []);
 
   const resetTvOverlay = () => {
@@ -4811,6 +4904,7 @@ function TvScreen({ roomCode, brandRoom, themeStyle, brandName, brandLogo, curre
   useEffect(() => {
     setYoutubeReady(false);
     setYoutubeError("");
+    setPrepareNextNow(false);
     reportedYoutubeErrorRef.current = null;
   }, [currentSong?.id, currentSong?.repeatKey, currentSong?.youtubeId, currentSong?.localVideoUrl]);
 
@@ -4884,6 +4978,18 @@ function TvScreen({ roomCode, brandRoom, themeStyle, brandName, brandLogo, curre
     >
       <div className="tv-ambient" />
 
+      <button
+        ref={keepAliveButtonRef}
+        type="button"
+        aria-hidden="true"
+        tabIndex="-1"
+        style={{ position: "fixed", width: 1, height: 1, opacity: 0, pointerEvents: "none", left: -10, top: -10 }}
+        onClick={() => {
+          setTvActivated(true);
+          resetTvOverlay();
+        }}
+      />
+
       {false && !tvActivated && null}
 
       <button
@@ -4909,9 +5015,11 @@ function TvScreen({ roomCode, brandRoom, themeStyle, brandName, brandLogo, curre
                       song={currentSong}
                       shouldPlay={shouldPlayMedia}
                       tvActivated={tvActivated}
+                      keepAliveTick={keepAliveTick}
                       onReadyChange={setYoutubeReady}
                       onError={handleYoutubeError}
                       onEnded={onVideoEnded}
+                      onNearEnd={() => setPrepareNextNow(true)}
                     />
                   ) : (
                     <YouTubeSmartPlayer
@@ -4919,10 +5027,32 @@ function TvScreen({ roomCode, brandRoom, themeStyle, brandName, brandLogo, curre
                       shouldPlay={shouldPlayMedia}
                       shouldWarmup={shouldWarmupMedia}
                       tvActivated={tvActivated}
+                      keepAliveTick={keepAliveTick}
                       onReadyChange={setYoutubeReady}
                       onError={handleYoutubeError}
                       onEnded={onVideoEnded}
+                      onNearEnd={() => setPrepareNextNow(true)}
                     />
+                  )}
+
+                  {prepareNextNow && nextSongToPreload && (
+                    <div style={{ position: "fixed", width: 1, height: 1, opacity: 0, pointerEvents: "none", left: -20, top: -20, overflow: "hidden" }}>
+                      {nextSongToPreload.localVideoUrl ? (
+                        <video src={nextSongToPreload.localVideoUrl} preload="auto" muted playsInline />
+                      ) : nextSongToPreload.youtubeId ? (
+                        <YouTubeSmartPlayer
+                          song={nextSongToPreload}
+                          shouldPlay={false}
+                          shouldWarmup={true}
+                          tvActivated={true}
+                          keepAliveTick={keepAliveTick}
+                          onReadyChange={() => {}}
+                          onError={() => {}}
+                          onEnded={() => {}}
+                          onNearEnd={() => {}}
+                        />
+                      ) : null}
+                    </div>
                   )}
 
                   {!showIntro && !youtubeReady && !youtubeError && (
